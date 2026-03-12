@@ -56,7 +56,7 @@ impl Default for ShredsStateTracker {
 /// receive shreds per FEC set, attempting to recover the other shreds in the fec set so you do not have to wait until all data shreds have arrived.
 /// every time a fec is recovered, scan for neighbouring DATA_COMPLETE_SHRED flags in the shreds, attempting to deserialize into solana entries when there are no missing shreds between the DATA_COMPLETE_SHRED flags.
 /// note that an FEC set doesn't necessarily contain DATA_COMPLETE_SHRED in the last shred. when deserializing the bincode data, you must use data between shreds starting at the last DATA_COMPLETE_SHRED (not inclusive) to the next DATA_COMPLETE_SHRED (inclusive)
-pub fn reconstruct_shreds(
+pub fn reconstruct_shreds<F>(
     packet_batch: PacketBatch,
     all_shreds: &mut ahash::HashMap<
         Slot,
@@ -66,12 +66,14 @@ pub fn reconstruct_shreds(
         ),
     >,
     slot_fec_indexes_to_iterate: &mut Vec<(Slot, u32)>,
-    deshredded_entries: &mut Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>,
+    mut on_entry_ready: F,
     highest_slot_seen: &mut Slot,
     rs_cache: &ReedSolomonCache,
     metrics: &ShredMetrics,
-) -> usize {
-    deshredded_entries.clear();
+) -> usize
+where
+    F: FnMut(Slot, &solana_entry::entry::Entry),
+{
     slot_fec_indexes_to_iterate.clear();
     // ingest all packets
     for packet in packet_batch.iter().filter_map(|p| p.data(..)) {
@@ -239,11 +241,14 @@ pub fn reconstruct_shreds(
         let txn_count = entries.iter().map(|e| e.transactions.len() as u64).sum();
         metrics.txn_count.fetch_add(txn_count, Ordering::Relaxed);
         debug!(
-            "Successfully decoded slot: {slot} start_data_complete_idx: {start_data_complete_idx} end_data_complete_idx: {end_data_complete_idx} with entry count: {}, txn count: {txn_count}",
+            "Successfully decoded slot: {slot} start_data_complete_idx: {start_data_complete_idx} end_data_complete_idx: {end_data_complete_idx} with entry count: {}, txn_count: {txn_count}",
             entries.len(),
         );
 
-        deshredded_entries.push((*slot, entries, deshredded_payload));
+        // 立即回调每个 Entry
+        for entry in &entries {
+            on_entry_ready(*slot, entry);
+        }
         to_deshred.iter().for_each(|shred| {
             let Some(shred) = shred.as_ref() else {
                 return;
@@ -672,7 +677,7 @@ mod tests {
         // Test 1: all shreds provided
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(
@@ -689,7 +694,9 @@ mod tests {
             ),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -700,7 +707,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             13580
         );
@@ -708,7 +715,7 @@ mod tests {
 
         let slot_to_entry = deshredded_entries
             .iter()
-            .into_group_map_by(|(slot, _entries, _entries_bytes)| *slot);
+            .into_group_map_by(|(slot, _entries)| *slot);
         // slot_to_entry
         //     .iter()
         //     .sorted_by_key(|(slot, _)| *slot)
@@ -727,7 +734,7 @@ mod tests {
         // Test 2: 33% of shreds missing
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(
@@ -746,7 +753,9 @@ mod tests {
             ),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -757,7 +766,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             13580
         );
@@ -765,7 +774,7 @@ mod tests {
 
         let slot_to_entry = deshredded_entries
             .iter()
-            .into_group_map_by(|(slot, _entries, _entries_bytes)| *slot);
+            .into_group_map_by(|(slot, _entries)| *slot);
         assert_eq!(slot_to_entry.len(), 29);
     }
 
@@ -849,7 +858,7 @@ mod tests {
         // Test 1: all shreds provided
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(
@@ -866,7 +875,9 @@ mod tests {
             ),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -877,7 +888,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             43170
         );
@@ -885,7 +896,7 @@ mod tests {
 
         let slot_to_entry = deshredded_entries
             .iter()
-            .into_group_map_by(|(slot, _entries, _entries_bytes)| *slot);
+            .into_group_map_by(|(slot, _entries)| *slot);
         // slot_to_entry
         //     .iter()
         //     .sorted_by_key(|(slot, _)| *slot)
@@ -904,7 +915,7 @@ mod tests {
         // Test 2: 33% of shreds missing
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(
@@ -923,7 +934,9 @@ mod tests {
             ),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -934,7 +947,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             43170
         );
@@ -942,7 +955,7 @@ mod tests {
 
         let slot_to_entry = deshredded_entries
             .iter()
-            .into_group_map_by(|(slot, _entries, _entries_bytes)| *slot);
+            .into_group_map_by(|(slot, _entries)| *slot);
         assert_eq!(slot_to_entry.len(), 61);
     }
 
@@ -1005,13 +1018,15 @@ mod tests {
         // Test 1: all shreds provided
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(packets.clone()),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -1020,7 +1035,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             entries.len()
         );
@@ -1032,7 +1047,7 @@ mod tests {
         // Test 2: 33% of shreds missing
         let mut all_shreds = ahash::HashMap::default();
         let mut slot_fec_indexes_to_iterate: Vec<(Slot, u32)> = Vec::new();
-        let mut deshredded_entries = Vec::new();
+        let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>)> = Vec::new();
         let mut highest_slot_seen = 0;
         let recovered_count = reconstruct_shreds(
             PacketBatch::new(
@@ -1045,7 +1060,9 @@ mod tests {
             ),
             &mut all_shreds,
             &mut slot_fec_indexes_to_iterate,
-            &mut deshredded_entries,
+            |slot, entry| {
+                deshredded_entries.push((slot, vec![entry.clone()]));
+            },
             &mut highest_slot_seen,
             &rs_cache,
             &metrics,
@@ -1054,7 +1071,7 @@ mod tests {
         assert_eq!(
             deshredded_entries
                 .iter()
-                .map(|(_slot, entries, _entries_bytes)| entries.len())
+                .map(|(_slot, entries)| entries.len())
                 .sum::<usize>(),
             entries.len()
         );

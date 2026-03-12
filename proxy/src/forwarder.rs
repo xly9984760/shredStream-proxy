@@ -95,31 +95,30 @@ pub fn start_forwarder_threads(
                     ),
                 >::default();
                 let mut slot_fec_indexes_to_iterate = Vec::<(Slot, u32)>::new();
-                let mut deshredded_entries =
-                    Vec::<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>::new();
                 let mut highest_slot_seen: Slot = 0;
                 let rs_cache = ReedSolomonCache::default();
 
                 while !exit.load(Ordering::Relaxed) {
-                    match reconstruct_rx.recv_timeout(Duration::from_millis(100)) {
+                    match reconstruct_rx.recv_timeout(Duration::from_millis(10)) {
                         Ok(pkt_batch) => {
+                            let entry_sender_clone = entry_sender.clone();
+                            
                             deshred::reconstruct_shreds(
                                 pkt_batch,
                                 &mut all_shreds,
                                 &mut slot_fec_indexes_to_iterate,
-                                &mut deshredded_entries,
+                                |slot, entry| {
+                                    // 立即发送单个 Entry，保持客户端兼容（包装成 Vec）
+                                    if let Ok(single_entry_bytes) = bincode::serialize(&vec![entry]) {
+                                        let _ = entry_sender_clone.send(PbEntry {
+                                            slot,
+                                            entries: single_entry_bytes,
+                                        });
+                                    }
+                                },
                                 &mut highest_slot_seen,
                                 &rs_cache,
                                 &metrics,
-                            );
-
-                            deshredded_entries.drain(..).for_each(
-                                |(slot, _entries, entries_bytes)| {
-                                    let _ = entry_sender.send(PbEntry {
-                                        slot,
-                                        entries: entries_bytes,
-                                    });
-                                },
                             );
                         }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {} // do nothing
