@@ -25,7 +25,7 @@ use solana_perf::{
     packet::{PacketBatch, PacketBatchRecycler},
     recycler::Recycler,
 };
-use solana_sdk::clock::Slot;
+use solana_sdk::{clock::Slot, vote::program::id as vote_program_id};
 use solana_streamer::{
     sendmmsg::{batch_send, SendPktsError},
     streamer::{self, StreamerReceiveStats},
@@ -108,8 +108,31 @@ pub fn start_forwarder_threads(
                                 &mut all_shreds,
                                 &mut slot_fec_indexes_to_iterate,
                                 |slot, entry| {
+                                    // 过滤投票交易：只保留非投票交易
+                                    let vote_program = vote_program_id();
+                                    let non_vote_txs: Vec<_> = entry.transactions.iter()
+                                        .filter(|tx| {
+                                            // 获取交易中的账户列表并检查是否包含 vote program
+                                            let account_keys = tx.message.static_account_keys();
+                                            !account_keys.iter().any(|key| key == &vote_program)
+                                        })
+                                        .cloned()
+                                        .collect();
+                                    
+                                    // 如果过滤后没有交易了，跳过不发送
+                                    if non_vote_txs.is_empty() {
+                                        return;
+                                    }
+                                    
+                                    // 创建新的 Entry，只包含非投票交易
+                                    let filtered_entry = solana_entry::entry::Entry {
+                                        num_hashes: entry.num_hashes,
+                                        hash: entry.hash,
+                                        transactions: non_vote_txs,
+                                    };
+                                    
                                     // 立即发送单个 Entry，保持客户端兼容（包装成 Vec）
-                                    if let Ok(single_entry_bytes) = bincode::serialize(&vec![entry]) {
+                                    if let Ok(single_entry_bytes) = bincode::serialize(&vec![filtered_entry]) {
                                         let _ = entry_sender_clone.send(PbEntry {
                                             slot,
                                             entries: single_entry_bytes,

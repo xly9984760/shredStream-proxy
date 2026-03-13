@@ -31,6 +31,10 @@ pub fn start_server_thread(
         let server_handle = runtime.spawn(async move {
             info!("starting server on {:?}", addr);
             tonic::transport::Server::builder()
+                // 配置 HTTP2 keepalive，防止连接超时
+                .http2_keepalive_interval(Some(Duration::from_secs(10)))  // 每 10 秒发送 keepalive ping
+                .http2_keepalive_timeout(Some(Duration::from_secs(20)))   // 20 秒无响应则超时
+                .tcp_keepalive(Some(Duration::from_secs(60)))             // TCP 层 keepalive
                 .add_service(ShredstreamProxyServer::new(ShredstreamProxyService {
                     entry_sender,
                 }))
